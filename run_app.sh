@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Word Counter App Launcher
+# BuzzWords Counter Launcher
 set -e
 
 # Navigate to app directory

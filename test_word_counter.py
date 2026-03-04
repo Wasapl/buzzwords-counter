@@ -12,7 +12,7 @@ import json
 
 from word_counter import (
     WordCounterApp, PhoneticMatcher, LETTER_PHONETICS,
-    GRAMMAR_CONFIDENCE_THRESHOLD,
+    MAX_TRANSCRIPT_LINES,
     STARTUP_CALIBRATION_SECONDS,
 )
 
@@ -126,6 +126,15 @@ class TestPhoneticMatcherAbbreviation(unittest.TestCase):
     def test_sas_reduces_false_positive_on_common_words(self):
         m = PhoneticMatcher("SAS")
         self.assertEqual(m.count_matches("this is as simple as it gets"), 0)
+
+    def test_sas_grammar_excludes_single_char_a_token(self):
+        m = PhoneticMatcher("SAS")
+        grammar_words = json.loads(m.build_vosk_grammar())
+        self.assertNotIn("a", grammar_words)
+
+    def test_sas_variants_do_not_include_joined_noise_forms(self):
+        m = PhoneticMatcher("SAS")
+        self.assertNotIn("esayess", m.variants)
 
 
 class TestPluralAndPossessive(unittest.TestCase):
@@ -479,8 +488,6 @@ class TestCountWord(unittest.TestCase):
 
 
 
-
-
 # =========================================================================
 # Result handler tests (legacy path)
 # =========================================================================
@@ -511,10 +518,10 @@ class TestHandleResults(unittest.TestCase):
         self.app._handle_final_result("second sentence")
         self.assertEqual(len(self.app._full_transcript), 2)
 
-    def test_handle_final_keeps_max_20_lines(self):
-        for i in range(25):
+    def test_handle_final_keeps_max_lines(self):
+        for i in range(MAX_TRANSCRIPT_LINES + 5):
             self.app._handle_final_result(f"line {i}")
-        self.assertLessEqual(len(self.app._full_transcript), 20)
+        self.assertLessEqual(len(self.app._full_transcript), MAX_TRANSCRIPT_LINES)
 
     def test_handle_partial_counts_new_words_only(self):
         self.app._previous_partial = ""
@@ -721,6 +728,28 @@ class TestGrammarHandlers(unittest.TestCase):
         self.app._handle_grammar_partial("ay [unk]")
         self.assertEqual(self.app._peak_partial_count, 1)
 
+    def test_long_abbreviation_partial_peak_not_committed(self):
+        """For 3+ letter abbreviations (e.g. SAS), speculative partial
+        peaks should not be committed if final has no confirmed match."""
+        self.app.target_word = "sas"
+        self.app._matcher = PhoneticMatcher("SAS")
+        self.app._handle_grammar_partial("es ay es")
+        self.assertEqual(self.app._partial_count, 1)
+        self.assertEqual(self.app._peak_partial_count, 1)
+        res = self._make_result([("[unk]", 1.0), ("[unk]", 1.0)])
+        self.app._handle_grammar_final(res)
+        self.assertEqual(self.app.count, 0)
+        self.assertEqual(self.app._partial_count, 0)
+        self.assertEqual(self.app._peak_partial_count, 0)
+
+    def test_long_abbreviation_final_still_counts(self):
+        """Long abbreviations should still count when final is confirmed."""
+        self.app.target_word = "sas"
+        self.app._matcher = PhoneticMatcher("SAS")
+        res = self._make_result([("sas", 0.95)])
+        self.app._handle_grammar_final(res)
+        self.assertEqual(self.app.count, 1)
+
     def test_strip_unk(self):
         self.assertEqual(self.app._strip_unk("[unk] ay [unk] eye [unk]"), "ay eye")
         self.assertEqual(self.app._strip_unk("[unk]"), "")
@@ -758,6 +787,76 @@ class TestGrammarHandlers(unittest.TestCase):
         self.assertEqual(self.app._previous_partial, "hello")
         self.app._handle_transcript_partial("hello world")
         self.assertEqual(self.app._previous_partial, "hello world")
+
+    def test_transcript_final_with_count_true(self):
+        """When count=True, transcript final should also commit matches."""
+        self.app.target_word = "ai"
+        self.app._matcher = PhoneticMatcher("AI")
+        self.app._handle_transcript_final("we discussed ai today", count=True)
+        self.assertEqual(self.app.count, 1)
+        self.assertEqual(self.app._full_transcript, ["we discussed ai today"])
+
+    def test_transcript_final_with_count_false_no_counting(self):
+        """Default count=False should not affect the counter."""
+        self.app.target_word = "ai"
+        self.app._matcher = PhoneticMatcher("AI")
+        self.app._handle_transcript_final("we discussed ai today")
+        self.assertEqual(self.app.count, 0)
+
+    def test_transcript_partial_with_count_true(self):
+        """When count=True, transcript partial should update speculative count."""
+        self.app.target_word = "ai"
+        self.app._matcher = PhoneticMatcher("AI")
+        self.app._handle_transcript_partial("talking about ai", count=True)
+        self.assertEqual(self.app._partial_count, 1)
+        self.assertEqual(self.app.count, 0)
+
+    def test_transcript_partial_with_count_false_no_counting(self):
+        """Default count=False should not update speculative count."""
+        self.app.target_word = "ai"
+        self.app._matcher = PhoneticMatcher("AI")
+        self.app._handle_transcript_partial("talking about ai")
+        self.assertEqual(self.app._partial_count, 0)
+
+
+# =========================================================================
+# _use_grammar_recognizer tests
+# =========================================================================
+
+class TestUseGrammarRecognizer(unittest.TestCase):
+    """Test the abbreviation-only grammar recognizer gate."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = _make_app(self.root)
+
+    def tearDown(self):
+        self.app.is_listening = False
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def test_abbreviation_uses_grammar(self):
+        self.app._matcher = PhoneticMatcher("AI")
+        self.assertTrue(self.app._use_grammar_recognizer())
+
+    def test_long_abbreviation_uses_grammar(self):
+        self.app._matcher = PhoneticMatcher("SAS")
+        self.assertTrue(self.app._use_grammar_recognizer())
+
+    def test_regular_word_skips_grammar(self):
+        self.app._matcher = PhoneticMatcher("long")
+        self.assertFalse(self.app._use_grammar_recognizer())
+
+    def test_regular_word_hello_skips_grammar(self):
+        self.app._matcher = PhoneticMatcher("hello")
+        self.assertFalse(self.app._use_grammar_recognizer())
+
+    def test_no_matcher_skips_grammar(self):
+        self.app._matcher = None
+        self.assertFalse(self.app._use_grammar_recognizer())
 
 
 # =========================================================================
@@ -991,14 +1090,14 @@ class TestErrorResilience(unittest.TestCase):
         self.assertEqual(self.app.count, 10000)
 
     def test_handle_final_result_transcript_limit(self):
-        """Transcript should not grow beyond 20 lines."""
+        """Transcript should not grow beyond MAX_TRANSCRIPT_LINES."""
         self.app.target_word = "x"
         self.app._matcher = PhoneticMatcher("x")
-        for i in range(50):
+        for i in range(MAX_TRANSCRIPT_LINES + 30):
             self.app._handle_final_result(f"sentence {i}")
-        self.assertEqual(len(self.app._full_transcript), 20)
+        self.assertEqual(len(self.app._full_transcript), MAX_TRANSCRIPT_LINES)
         # Most recent should be the last one
-        self.assertEqual(self.app._full_transcript[-1], "sentence 49")
+        self.assertEqual(self.app._full_transcript[-1], f"sentence {MAX_TRANSCRIPT_LINES + 29}")
 
     def test_reset_while_listening(self):
         """Reset should work even while listening."""

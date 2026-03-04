@@ -43,6 +43,8 @@ MAX_TRANSCRIPT_LINES = 20
 # Ignore initial mic audio to let device gain/noise suppression stabilize
 STARTUP_CALIBRATION_SECONDS = 3.0
 
+# Common English words added to the Vosk grammar as "padding" so the
+# decoder has realistic alternatives beyond the target variants + [unk].
 # Path to Vosk model (relative to this script)
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vosk-model-small-en-us-0.15")
 
@@ -176,18 +178,29 @@ class PhoneticMatcher:
         if not letters:
             return
 
+        strict_long_abbreviation = len(letters) >= 3
+
         letter_options = []
         for letter in letters:
             options = LETTER_PHONETICS.get(letter, [letter])
+            if strict_long_abbreviation:
+                # For 3+ letter abbreviations, drop single-character
+                # sounds (like "a", "i", "e") to avoid broad grammar
+                # matches that create false positives.
+                options = [opt for opt in options if len(opt) > 1]
+                if not options:
+                    options = [letter]
             letter_options.append(options)
 
         for combo in product(*letter_options):
             # Space-separated: "ay eye"
             spaced = ' '.join(combo)
             self.variants.add(spaced)
-            # Joined: "ayeye"
-            joined = ''.join(combo)
-            self.variants.add(joined)
+            # Joined forms are useful for very short abbreviations (AI, ML),
+            # but become noisy for longer acronyms.
+            if not strict_long_abbreviation:
+                joined = ''.join(combo)
+                self.variants.add(joined)
 
         # Also add each individual letter sound as a standalone variant,
         # but only for short abbreviations (<=2 letters).
@@ -203,9 +216,9 @@ class PhoneticMatcher:
 
         # Common merged forms the model produces
         # e.g. for "AI" Vosk often says just "aye"
-        if len(letters) >= 2:
+        if not strict_long_abbreviation and len(letters) >= 2:
             for combo in product(*letter_options):
-                # Also try merging last two parts
+                # Try merging each adjacent pair of parts
                 for k in range(len(combo) - 1):
                     merged = list(combo)
                     merged[k] = merged[k] + merged[k + 1]
@@ -280,7 +293,12 @@ class PhoneticMatcher:
         return len(re.findall(r'\b' + re.escape(self.target) + r'\b', lowered))
 
     def is_phonetic_match(self, word):
-        """Check if a single word sounds like the target (live fallback)."""
+        """Check if a single word sounds like the target.
+
+        Uses variant set membership, then Metaphone / Soundex / Jaro-Winkler
+        as fallbacks.  Not called by the stream loop (which relies on the
+        compiled regex), but available for external consumers.
+        """
         if not word:
             return False
         w = word.lower().strip()
@@ -307,6 +325,9 @@ class PhoneticMatcher:
 
         Includes every variant (individual words) plus the special
         ``[unk]`` token so Vosk can absorb non-matching speech.
+
+        Only used for abbreviations — regular words skip the grammar
+        recognizer entirely (see ``_use_grammar_recognizer``).
         """
         # Collect every individual word that appears in any variant.
         # Vosk grammar expects single tokens, so multi-word variants
@@ -603,34 +624,52 @@ class WordCounterApp:
         self.update_count()
         self.update_transcript("")
 
+    def _use_grammar_recognizer(self):
+        """Return whether to use a grammar-constrained recognizer.
+
+        Grammar-constrained decoding is only beneficial for abbreviations
+        (AI, GPU, SAS, ...) where the unconstrained decoder struggles
+        with short/unusual tokens.  For regular English words, the
+        grammar is so tiny that Vosk force-maps unrelated speech to
+        the target, causing many false positives.
+        """
+        return bool(self._matcher and self._matcher.is_abbreviation)
+
     # ------------------------------------------------ Real-time stream loop
     def _stream_loop(self, device_index):
         """
-        Core streaming loop using **dual recognizers**:
+        Core streaming loop.
 
-        1. A *grammar-constrained* recognizer that only outputs our
-           phonetic variants (+ ``[unk]``).  This makes Vosk's decoder
-           strongly biased toward the target word, dramatically
-           improving detection of abbreviations like "AI".
-        2. An *unconstrained* recognizer for human-readable transcript
-           display.
+        For **abbreviations** (AI, GPU, SAS, ...), runs dual recognizers:
+          1. A *grammar-constrained* recognizer biased toward the target's
+             phonetic variants — drives the count.
+          2. An *unconstrained* recognizer — drives the transcript.
 
-        Both receive the same audio frames on every iteration.
+        For **regular words** (long, hello, ...), runs only the
+        unconstrained recognizer and counts matches from its output
+        using the compiled phonetic regex.  This avoids the false
+        positives that a tiny grammar (``["long", "[unk]"]``) would
+        create.
+
+        Both paths share identical audio capture and calibration logic.
         """
         from vosk import KaldiRecognizer
 
-        # --- Unconstrained recognizer (transcript) -----------------------
+        use_grammar = self._use_grammar_recognizer()
+
+        # --- Unconstrained recognizer (transcript, and counting for regular words)
         rec_transcript = KaldiRecognizer(self._vosk_model, SAMPLE_RATE)
         rec_transcript.SetWords(True)
 
-        # --- Grammar-constrained recognizer (counting) -------------------
-        if self._matcher:
+        # --- Grammar-constrained recognizer (counting for abbreviations only)
+        rec_grammar = None
+        if use_grammar and self._matcher:
             grammar = self._matcher.build_vosk_grammar()
             logger.info(f"Vosk grammar ({len(grammar)} chars): {grammar[:200]}")
             rec_grammar = KaldiRecognizer(self._vosk_model, SAMPLE_RATE, grammar)
             rec_grammar.SetWords(True)
-        else:
-            rec_grammar = None
+        elif self._matcher:
+            logger.info(f"Regular word mode — counting from unconstrained recognizer")
 
         try:
             self._pyaudio = pyaudio.PyAudio()
@@ -693,17 +732,17 @@ class WordCounterApp:
                             if gtext:
                                 self._handle_grammar_partial(gtext)
 
-                    # -- Unconstrained recognizer (transcript) --
+                    # -- Unconstrained recognizer (transcript + counting for regular words) --
                     if rec_transcript.AcceptWaveform(data):
                         result = json.loads(rec_transcript.Result())
                         text = result.get("text", "")
                         if text:
-                            self._handle_transcript_final(text)
+                            self._handle_transcript_final(text, count=not use_grammar)
                     else:
                         partial = json.loads(rec_transcript.PartialResult())
                         partial_text = partial.get("partial", "")
                         if partial_text:
-                            self._handle_transcript_partial(partial_text)
+                            self._handle_transcript_partial(partial_text, count=not use_grammar)
                 except (json.JSONDecodeError, KeyError) as e:
                     logger.warning(f"Skipping malformed recognizer output: {e}")
                     continue
@@ -717,7 +756,7 @@ class WordCounterApp:
                 tfinal = json.loads(rec_transcript.FinalResult())
                 ttext = tfinal.get("text", "")
                 if ttext:
-                    self._handle_transcript_final(ttext)
+                    self._handle_transcript_final(ttext, count=not use_grammar)
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Error flushing final result: {e}")
 
@@ -752,16 +791,39 @@ class WordCounterApp:
     # ------------------------------------------------- Result processing
     # Shared helpers --------------------------------------------------------
 
+    def _use_peak_partial_fallback(self):
+        """Return whether partial-peak fallback should be used.
+
+        For short targets (including short abbreviations like "AI"),
+        partial peaks help avoid losing true positives when Vosk revises
+        late results.
+
+        For longer abbreviations (3+ letters like "SAS"), forced-grammar
+        partials are more likely to be false positives, so we commit only
+        from final results.
+        """
+        if not self._matcher or not self._matcher.is_abbreviation:
+            return True
+        letter_count = sum(1 for c in self._matcher.target if c.isalpha())
+        return letter_count <= 2
+
     def _commit_utterance(self, final_matches):
         """Commit the count for a completed utterance.
 
-        Takes ``max(final_matches, _peak_partial_count)`` so that if
-        the partial caught a match that the final lost (or the
-        confidence filter removed), the match is still committed.
+        For short targets, uses ``max(final_matches, _peak_partial_count)``
+        so that if the partial caught a match that the final lost, the
+        match is still committed.
+
+        For longer abbreviations (3+ letters), commits from ``final_matches``
+        only to reduce false positives from speculative partials.
+
         Resets both ``_partial_count`` and ``_peak_partial_count``.
         """
         with self._lock:
-            committed = max(final_matches, self._peak_partial_count)
+            if self._use_peak_partial_fallback():
+                committed = max(final_matches, self._peak_partial_count)
+            else:
+                committed = final_matches
             self.count += committed
             self._partial_count = 0
             self._peak_partial_count = 0
@@ -849,26 +911,39 @@ class WordCounterApp:
 
     # Transcript recognizer handlers ----------------------------------------
 
-    def _handle_transcript_final(self, text):
-        """Append finalised text to the readable transcript."""
+    def _handle_transcript_final(self, text, count=False):
+        """Append finalised text to the readable transcript.
+
+        When *count* is True (regular-word mode), also counts
+        target-word matches and commits them via ``_commit_utterance``.
+        """
+        if count:
+            final_matches = self._count_matches_in(text)
+            self._commit_utterance(final_matches)
         self._append_transcript(text)
         with self._lock:
             self._previous_partial = ""
         self._update_transcript_display()
 
-    def _handle_transcript_partial(self, text):
-        """Update the live partial line in the transcript."""
+    def _handle_transcript_partial(self, text, count=False):
+        """Update the live partial line in the transcript.
+
+        When *count* is True (regular-word mode), also updates the
+        speculative partial count so the UI reflects live progress.
+        """
         with self._lock:
             changed = text != self._previous_partial
             if changed:
                 self._previous_partial = text
         if changed:
+            if count:
+                partial_matches = self._count_matches_in(text)
+                self._update_speculative_count(partial_matches)
             self._update_transcript_display()
 
-    # Legacy handlers — used only by the ``process_speech()`` simplified
-    # public API, NOT by the dual-recognizer stream loop.  Kept for
-    # backward compatibility and testing of the partial→final anti-
-    # double-count logic in isolation.
+    # Legacy handlers — NOT used by the dual-recognizer stream loop.
+    # Provided as a simplified public API for external consumers and
+    # for testing the partial→final anti-double-count logic in isolation.
 
     def _handle_final_result(self, text):
         """Commit a finalized phrase (legacy path, not used by stream loop)."""
@@ -902,7 +977,11 @@ class WordCounterApp:
         return words.count(self.target_word)
 
     def _count_word(self, text):
-        """Count occurrences of target word and add to confirmed count."""
+        """Count occurrences of target word and add to confirmed count.
+
+        Adds directly to ``self.count``, bypassing ``_commit_utterance``
+        and peak-partial tracking.  Used only by ``process_speech()``.
+        """
         if not text:
             return
         occurrences = self._count_matches_in(text)
@@ -912,7 +991,12 @@ class WordCounterApp:
             self.update_count()
 
     def process_speech(self, text):
-        """Process recognized speech and count target word (public API)."""
+        """Process recognized speech and count target word (public API).
+
+        Simplified path for external callers — counts matches directly
+        without partial/peak tracking.  The dual-recognizer stream loop
+        does NOT use this method; it uses the grammar handlers instead.
+        """
         if not text or not isinstance(text, str):
             return
         self._count_word(text)

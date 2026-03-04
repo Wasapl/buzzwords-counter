@@ -94,21 +94,25 @@ The app uses:
 - **Tkinter** for the graphical user interface
 
 ### Dual Recognizer Architecture
-The app runs **two Vosk recognizers** simultaneously on the same audio stream:
+The app adapts its recognizer strategy based on the target word type:
 
-1. **Grammar-constrained recognizer** — configured with only the phonetic variants of the target word (+ `[unk]`). This biases Vosk's decoder heavily toward the target, dramatically improving detection of short words and abbreviations like "AI".
+**For abbreviations** (AI, GPU, SAS, ...), the app runs **two Vosk recognizers** simultaneously on the same audio stream:
+
+1. **Grammar-constrained recognizer** — configured with only the phonetic variants of the target word (+ `[unk]`). This biases Vosk's decoder heavily toward the target, dramatically improving detection of short/unusual tokens.
 2. **Unconstrained recognizer** — runs freely for human-readable transcript display.
 
-Each recognizer's output is processed independently: the grammar recognizer drives the count, the unconstrained recognizer drives the transcript.
+The grammar recognizer drives the count; the unconstrained recognizer drives the transcript.
+
+**For regular words** (long, hello, ...), only the **unconstrained recognizer** runs. It handles both transcript display and counting via compiled phonetic regex matching. A grammar-constrained approach is counterproductive for common words — a tiny grammar like `["long", "[unk]"]` causes Vosk to force-map unrelated speech to the target, producing many false positives.
 
 ### Confidence Filtering
-The grammar recognizer returns per-word confidence scores. Tokens with confidence below the threshold (default: 0.5) are discarded to prevent false positives — e.g. when background noise or common words like "hey" are force-mapped to target variants.
+The grammar recognizer returns per-word confidence scores. Tokens with confidence below the threshold (default: 0.6) are discarded to prevent false positives — e.g. when background noise or common words like "hey" are force-mapped to target variants.
 
 ### Peak Partial Tracking
 Vosk emits partial results as speech is being recognized. Sometimes a partial correctly detects a target word, but a later partial revision or the final result loses it. The app tracks the **peak partial match count** per utterance so that once a match is detected, it is never lost to a later revision.
 
 ### Audio Pipeline
-PyAudio captures 250ms frames → both recognizers process each frame → grammar results drive the counter with confidence filtering → unconstrained results drive the transcript display.
+PyAudio captures 250ms frames → for abbreviations, both recognizers process each frame (grammar results drive the counter with confidence filtering, unconstrained results drive the transcript); for regular words, only the unconstrained recognizer runs and drives both counting and transcript.
 
 ### Startup Calibration
 To improve first-run accuracy, the app ignores the first **3.0 seconds** of microphone input after Start is pressed. This allows macOS audio routing, gain control, and noise suppression to stabilize before recognition/counting begins.
@@ -157,13 +161,13 @@ source venv/bin/activate
 python -m unittest test_word_counter
 ```
 
-All 135 tests should pass.
+All 151 tests should pass.
 
 ## Notes
 
 - Fully offline — no internet connection or API keys required
 - Word matching is case-insensitive
-- **Abbreviations are auto-expanded** into all phonetic variants (no manual configuration needed)
+- **Abbreviations are auto-expanded** into phonetic variants, with stricter matching for 3+ letter acronyms to reduce false positives
 - **Plurals and possessives** are matched automatically (e.g. "AIs", "AI's")
 - The counter increments for each occurrence of the word, even if it appears multiple times in one phrase
 - The app uses peak-partial tracking and confidence filtering so words are not double-counted or lost during streaming
@@ -174,5 +178,3 @@ All 135 tests should pass.
 ## License
 
 Free to use and modify for personal and commercial purposes.
-# buzzwords-counter
-# buzzwords-counter
