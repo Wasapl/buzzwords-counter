@@ -19,6 +19,7 @@ import json
 import os
 import time
 import logging
+from collections import Counter
 from itertools import product
 
 import jellyfish
@@ -43,8 +44,13 @@ MAX_TRANSCRIPT_LINES = 20
 # Ignore initial mic audio to let device gain/noise suppression stabilize
 STARTUP_CALIBRATION_SECONDS = 3.0
 
-# Path to Vosk model (relative to this script)
-MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vosk-model-small-en-us-0.15")
+# Vosk model configuration
+# Prefer the large model (better vocabulary, filler detection) but fall
+# back to the small model if only that is available.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_LARGE = os.path.join(_APP_DIR, "vosk-model-en-us-0.22")
+MODEL_SMALL = os.path.join(_APP_DIR, "vosk-model-small-en-us-0.15")
+MODEL_DIR = MODEL_LARGE if os.path.isdir(MODEL_LARGE) else MODEL_SMALL
 
 # ---------------------------------------------------------------------------
 # Phonetic letter table: how each letter sounds when spoken aloud.
@@ -349,7 +355,7 @@ class WordCounterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("BuzzWords Counter")
-        self.root.geometry("420x460")
+        self.root.geometry("420x530")
         self.root.resizable(True, True)
 
         # Application state
@@ -369,6 +375,11 @@ class WordCounterApp:
         self._previous_partial = ""
         self._listening_started_at = 0.0
         self._calibration_done = False
+
+        # Word frequency tracking (dashboard mode)
+        self._word_freq = Counter()
+        self._dashboard_mode = False
+        self._dashboard_refresh_id = None
 
         # Phonetic matcher (created when listening starts)
         self._matcher = None
@@ -394,6 +405,7 @@ class WordCounterApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(3, weight=1)
 
         # Title
         ttk.Label(
@@ -418,9 +430,34 @@ class WordCounterApp:
         self.refresh_btn.grid(row=0, column=2, sticky=tk.E)
         mic_frame.columnconfigure(1, weight=1)
 
+        # Mode toggle
+        mode_frame = ttk.Frame(main_frame)
+        mode_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
+        ttk.Label(mode_frame, text="Mode:", font=("Helvetica", 9, "bold")).grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 6)
+        )
+        self._mode_var = tk.StringVar(value="buzzword")
+        self.mode_buzz_btn = ttk.Radiobutton(
+            mode_frame, text="\U0001f41d Buzzword",
+            variable=self._mode_var, value="buzzword",
+            command=self._toggle_mode
+        )
+        self.mode_buzz_btn.grid(row=0, column=1, sticky=tk.W)
+        self.mode_dash_btn = ttk.Radiobutton(
+            mode_frame, text="\U0001f4ca Dashboard",
+            variable=self._mode_var, value="dashboard",
+            command=self._toggle_mode
+        )
+        self.mode_dash_btn.grid(row=0, column=2, sticky=tk.W, padx=(8, 0))
+
+        # --- Buzzword mode content ---
+        self.buzzword_frame = ttk.Frame(main_frame)
+        self.buzzword_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.buzzword_frame.columnconfigure(0, weight=1)
+
         # Word input
-        word_frame = ttk.LabelFrame(main_frame, text="Target Word", padding="6")
-        word_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
+        word_frame = ttk.LabelFrame(self.buzzword_frame, text="Target Word", padding="6")
+        word_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
         ttk.Label(word_frame, text="Word to count:", font=("Helvetica", 9)).grid(row=0, column=0, sticky=tk.W, padx=(0, 6))
         self.word_entry = ttk.Entry(word_frame, width=25, font=("Helvetica", 10))
         self.word_entry.grid(row=0, column=1, sticky=(tk.W, tk.E))
@@ -428,34 +465,68 @@ class WordCounterApp:
         word_frame.columnconfigure(1, weight=1)
 
         # Counter
-        counter_frame = ttk.LabelFrame(main_frame, text="Count", padding="6")
-        counter_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
+        counter_frame = ttk.LabelFrame(self.buzzword_frame, text="Count", padding="6")
+        counter_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
         self.count_label = ttk.Label(
             counter_frame, text="0",
             font=("Helvetica", 28, "bold"), foreground="#2196F3"
         )
         self.count_label.pack()
 
+        # Live transcript
+        ttk.Label(self.buzzword_frame, text="Live transcript:", font=("Helvetica", 8)).grid(
+            row=2, column=0, sticky=tk.W
+        )
+        self.transcript_text = tk.Text(
+            self.buzzword_frame, height=4, width=45, wrap=tk.WORD, font=("Helvetica", 9)
+        )
+        self.transcript_text.grid(row=3, column=0, pady=(3, 6), sticky=(tk.W, tk.E))
+        self.transcript_text.config(state=tk.DISABLED)
+
+        # --- Dashboard mode content ---
+        self.dashboard_frame = ttk.Frame(main_frame)
+        self.dashboard_frame.columnconfigure(0, weight=1)
+        self.dashboard_frame.rowconfigure(0, weight=1)
+
+        tree_container = ttk.Frame(self.dashboard_frame)
+        tree_container.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        tree_container.columnconfigure(0, weight=1)
+        tree_container.rowconfigure(0, weight=1)
+
+        self.freq_tree = ttk.Treeview(
+            tree_container, columns=("rank", "word", "count"),
+            show="headings", height=12
+        )
+        self.freq_tree.heading("rank", text="#")
+        self.freq_tree.heading("word", text="Word")
+        self.freq_tree.heading("count", text="Count")
+        self.freq_tree.column("rank", width=40, anchor=tk.CENTER)
+        self.freq_tree.column("word", width=200, anchor=tk.W)
+        self.freq_tree.column("count", width=80, anchor=tk.CENTER)
+        self.freq_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        tree_scroll = ttk.Scrollbar(
+            tree_container, orient=tk.VERTICAL, command=self.freq_tree.yview
+        )
+        tree_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.freq_tree.configure(yscrollcommand=tree_scroll.set)
+
+        self.dash_stats_label = ttk.Label(
+            self.dashboard_frame, text="Total words: 0 | Unique: 0",
+            font=("Helvetica", 9), foreground="#666"
+        )
+        self.dash_stats_label.grid(row=1, column=0, pady=(4, 0), sticky=tk.W)
+
         # Status
         self.status_label = ttk.Label(
             main_frame, text="Status: Loading model...",
             font=("Helvetica", 9), foreground="#2196F3"
         )
-        self.status_label.grid(row=5, column=0, pady=(0, 4))
-
-        # Live transcript
-        ttk.Label(main_frame, text="Live transcript:", font=("Helvetica", 8)).grid(
-            row=6, column=0, sticky=tk.W
-        )
-        self.transcript_text = tk.Text(
-            main_frame, height=4, width=45, wrap=tk.WORD, font=("Helvetica", 9)
-        )
-        self.transcript_text.grid(row=7, column=0, pady=(3, 6), sticky=(tk.W, tk.E))
-        self.transcript_text.config(state=tk.DISABLED)
+        self.status_label.grid(row=4, column=0, pady=(0, 4))
 
         # Buttons
         btn_frame = ttk.Frame(main_frame)
-        btn_frame.grid(row=8, column=0)
+        btn_frame.grid(row=5, column=0)
         self.start_button = ttk.Button(
             btn_frame, text="\u25b6 Start",
             command=self.start_listening, width=10
@@ -471,6 +542,47 @@ class WordCounterApp:
             command=self.reset_count, width=10
         )
         self.reset_button.pack(side=tk.LEFT, padx=3)
+
+    # ---- Mode switching ---------------------------------------------------
+
+    def _toggle_mode(self):
+        """Switch between Buzzword and Dashboard views."""
+        self._dashboard_mode = (self._mode_var.get() == "dashboard")
+        if self._dashboard_mode:
+            self.buzzword_frame.grid_remove()
+            self.dashboard_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            self._start_dashboard_refresh()
+        else:
+            self.dashboard_frame.grid_remove()
+            self.buzzword_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            self._stop_dashboard_refresh()
+
+    def _start_dashboard_refresh(self):
+        """Start periodic dashboard refresh."""
+        self._stop_dashboard_refresh()
+        self._refresh_dashboard()
+
+    def _stop_dashboard_refresh(self):
+        """Stop periodic dashboard refresh."""
+        if self._dashboard_refresh_id is not None:
+            self.root.after_cancel(self._dashboard_refresh_id)
+            self._dashboard_refresh_id = None
+
+    def _refresh_dashboard(self):
+        """Refresh the dashboard treeview with current word frequencies."""
+        for item in self.freq_tree.get_children():
+            self.freq_tree.delete(item)
+        with self._lock:
+            word_counts = self._word_freq.most_common()
+            total = sum(self._word_freq.values())
+            unique = len(self._word_freq)
+        for rank, (word, count) in enumerate(word_counts, 1):
+            self.freq_tree.insert("", tk.END, values=(rank, word, count))
+        self.dash_stats_label.config(
+            text=f"Total words: {total} | Unique: {unique}"
+        )
+        if self._dashboard_mode:
+            self._dashboard_refresh_id = self.root.after(1000, self._refresh_dashboard)
 
     # --------------------------------------------------------- Model loading
     def _load_model(self):
@@ -561,18 +673,20 @@ class WordCounterApp:
             )
             return
 
-        raw_word = self.word_entry.get().strip()
-        if not raw_word:
-            messagebox.showwarning("Input Required", "Please enter a word to count.")
-            return
-
-        self.target_word = raw_word.lower()
-
-        # Build phonetic matcher
-        self._matcher = PhoneticMatcher(raw_word)
-        variants = self._matcher.describe_variants()
-        abbr_tag = " [abbreviation]" if self._matcher.is_abbreviation else ""
-        logger.info(f"Matching variants{abbr_tag}: {variants}")
+        if not self._dashboard_mode:
+            raw_word = self.word_entry.get().strip()
+            if not raw_word:
+                messagebox.showwarning("Input Required", "Please enter a word to count.")
+                return
+            self.target_word = raw_word.lower()
+            self._matcher = PhoneticMatcher(raw_word)
+            variants = self._matcher.describe_variants()
+            abbr_tag = " [abbreviation]" if self._matcher.is_abbreviation else ""
+            logger.info(f"Matching variants{abbr_tag}: {variants}")
+        else:
+            self.target_word = ""
+            self._matcher = None
+            logger.info("Dashboard mode \u2014 tracking all word frequencies")
 
         self.is_listening = True
         self._listening_started_at = time.monotonic()
@@ -612,15 +726,18 @@ class WordCounterApp:
         self.root.after(0, _update_ui)
 
     def reset_count(self):
-        """Reset counter and transcript."""
+        """Reset counter, transcript, and word frequencies."""
         with self._lock:
             self.count = 0
             self._partial_count = 0
             self._peak_partial_count = 0
             self._full_transcript = []
             self._previous_partial = ""
+            self._word_freq.clear()
         self.update_count()
         self.update_transcript("")
+        if self._dashboard_mode:
+            self._refresh_dashboard()
 
     def _use_grammar_recognizer(self):
         """Return whether to use a grammar-constrained recognizer.
@@ -796,14 +913,14 @@ class WordCounterApp:
         partial peaks help avoid losing true positives when Vosk revises
         late results — there is no confidence filter to override.
 
-        For **all abbreviations** (counted via the grammar-constrained
-        recognizer with per-word confidence filtering), peak partial is
-        disabled.  Grammar partials carry no confidence scores, so the
-        peak would bypass the confidence filter and commit false positives
-        that the final result correctly rejected.
+        For abbreviations, we keep peak fallback only for very short
+        targets (<=2 letters, e.g. AI/ML), where finals are often revised
+        away despite an earlier correct partial. For longer abbreviations,
+        peak fallback stays disabled to avoid extra false positives.
         """
         if self._matcher and self._matcher.is_abbreviation:
-            return False
+            letter_count = sum(1 for c in self._matcher.target if c.isalpha())
+            return letter_count <= 2
         return True
 
     def _commit_utterance(self, final_matches):
@@ -814,10 +931,10 @@ class WordCounterApp:
         partial caught a match that the final lost, the match is still
         committed.
 
-        For abbreviations (grammar recognizer with confidence filtering),
-        commits from ``final_matches`` only — peak partial is not used
-        because grammar partials lack confidence scores and would bypass
-        the confidence filter.
+        For abbreviations, commits with peak fallback only for very short
+        targets (<=2 letters). Longer abbreviations commit from
+        ``final_matches`` only to avoid false positives from speculative
+        grammar partials.
 
         Resets both ``_partial_count`` and ``_peak_partial_count``.
         """
@@ -918,10 +1035,15 @@ class WordCounterApp:
 
         When *count* is True (regular-word mode), also counts
         target-word matches and commits them via ``_commit_utterance``.
+        Also tracks word frequencies for the dashboard.
         """
         if count:
             final_matches = self._count_matches_in(text)
             self._commit_utterance(final_matches)
+        if text:
+            words = re.findall(r'\b\w+\b', text.lower())
+            with self._lock:
+                self._word_freq.update(words)
         self._append_transcript(text)
         with self._lock:
             self._previous_partial = ""
@@ -1051,6 +1173,7 @@ class WordCounterApp:
     def _on_close(self):
         """Handle window close gracefully."""
         self.is_listening = False
+        self._stop_dashboard_refresh()
         # Wait for listen thread to finish (with timeout to avoid hanging)
         if self._listen_thread and self._listen_thread.is_alive():
             self._listen_thread.join(timeout=2.0)

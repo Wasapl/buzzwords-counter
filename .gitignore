@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .DS_Store
 vosk-model-small-en-us-0.15/
+vosk-model-en-us-0.22/

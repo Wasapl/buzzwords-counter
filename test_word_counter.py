@@ -9,6 +9,7 @@ import tkinter as tk
 import threading
 import re
 import json
+import word_counter
 
 from word_counter import (
     WordCounterApp, PhoneticMatcher, LETTER_PHONETICS,
@@ -653,13 +654,12 @@ class TestGrammarHandlers(unittest.TestCase):
         self.assertEqual(self.app.count, 1)
 
     def test_grammar_final_only_unk(self):
-        """All [unk] with abbreviation: peak partial is NOT committed
-        because grammar partials lack confidence scores."""
+        """Short abbreviations can fall back to peak partial when final is [unk]."""
         self.app._partial_count = 1
         self.app._peak_partial_count = 1
         res = self._make_result([("[unk]", 1.0), ("[unk]", 1.0)])
         self.app._handle_grammar_final(res)
-        self.assertEqual(self.app.count, 0)  # abbreviation — no peak fallback
+        self.assertEqual(self.app.count, 1)  # short abbreviation — peak fallback
         self.assertEqual(self.app._partial_count, 0)
         self.assertEqual(self.app._peak_partial_count, 0)
 
@@ -684,9 +684,7 @@ class TestGrammarHandlers(unittest.TestCase):
         self.assertEqual(self.app._partial_count, 0)
 
     def test_grammar_partial_revises_to_unk_no_peak_commit_for_abbreviation(self):
-        """For abbreviations, if grammar partial initially hears a variant
-        then revises to all [unk], _peak_partial_count is tracked but NOT
-        committed — confidence-filtered finals are the only counting path."""
+        """For short abbreviations, peak partial is committed if final is [unk]."""
         self.app._handle_grammar_partial("ay [unk]")
         self.assertEqual(self.app._partial_count, 1)
         self.assertEqual(self.app._peak_partial_count, 1)
@@ -694,10 +692,10 @@ class TestGrammarHandlers(unittest.TestCase):
         self.app._handle_grammar_partial("[unk] [unk]")
         self.assertEqual(self.app._partial_count, 0)
         self.assertEqual(self.app._peak_partial_count, 1)  # peak preserved!
-        # Final confirms nothing — peak is NOT committed for abbreviations
+        # Final confirms nothing — short abbreviation uses peak fallback
         res = self._make_result([("[unk]", 1.0), ("[unk]", 1.0)])
         self.app._handle_grammar_final(res)
-        self.assertEqual(self.app.count, 0)  # no peak fallback
+        self.assertEqual(self.app.count, 1)
         self.assertEqual(self.app._peak_partial_count, 0)
 
     def test_grammar_partial_then_final_no_double(self):
@@ -899,6 +897,64 @@ class TestBuildVoskGrammar(unittest.TestCase):
         parsed = json.loads(m.build_vosk_grammar())
         self.assertIn("hello", parsed)
         self.assertIn("[unk]", parsed)
+
+
+# =========================================================================
+# Dashboard / model selection tests
+# =========================================================================
+
+class TestDashboardMode(unittest.TestCase):
+    """Tests for dashboard word-frequency behavior."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = _make_app(self.root)
+
+    def tearDown(self):
+        self.app.is_listening = False
+        try:
+            self.app._stop_dashboard_refresh()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def test_transcript_final_updates_word_frequency(self):
+        self.app._handle_transcript_final("hello world hello")
+        self.assertEqual(self.app._word_freq["hello"], 2)
+        self.assertEqual(self.app._word_freq["world"], 1)
+
+    def test_dashboard_sorts_by_most_common(self):
+        self.app._word_freq.update(["hello", "hello", "ai", "world", "world", "world"])
+        self.app._refresh_dashboard()
+        rows = self.app.freq_tree.get_children()
+        self.assertGreaterEqual(len(rows), 3)
+        first_values = self.app.freq_tree.item(rows[0], "values")
+        self.assertEqual(first_values[1], "world")
+        self.assertEqual(int(first_values[2]), 3)
+
+    def test_reset_clears_word_frequency(self):
+        self.app._word_freq.update(["um", "um", "ah"])
+        self.app.reset_count()
+        self.assertEqual(sum(self.app._word_freq.values()), 0)
+
+    def test_toggle_to_dashboard_sets_mode(self):
+        self.app._mode_var.set("dashboard")
+        self.app._toggle_mode()
+        self.assertTrue(self.app._dashboard_mode)
+
+
+class TestModelSelection(unittest.TestCase):
+    """Tests for model directory preference constants."""
+
+    def test_model_dir_prefers_large_when_present(self):
+        if word_counter.os.path.isdir(word_counter.MODEL_LARGE):
+            self.assertEqual(word_counter.MODEL_DIR, word_counter.MODEL_LARGE)
+        else:
+            self.assertEqual(word_counter.MODEL_DIR, word_counter.MODEL_SMALL)
 
 
 # =========================================================================

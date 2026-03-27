@@ -1,12 +1,19 @@
 # BuzzWords Counter
 
-A macOS application that uses **Vosk** (offline, real-time speech recognition) and **phonetic matching** to listen to your microphone and count how many times you say a specific word. Automatically catches mis-transcriptions of abbreviations like "AI", "GPU", "ML" etc. No internet connection or API keys required.
+A macOS application that uses **Vosk** (offline, real-time speech recognition) for two live modes:
+
+- **Buzzword mode**: count how many times you say one target word
+- **Dashboard mode**: track all recognized words and show frequency ranking (most-used to least-used)
+
+It automatically catches many abbreviation mis-transcriptions like "AI", "GPU", "ML" with phonetic matching. No internet connection or API keys required.
 
 ## Features
 
 - 🎤 Real-time streaming speech recognition (~250ms latency)
+- 🔀 Two modes with a UI toggle: Buzzword and Dashboard
 - 🔢 Live word counting with partial result tracking
 - 🎯 Customizable target word (default: "AI")
+- 📊 Live word-frequency dashboard (all words, sorted by count)
 - 🔊 **Automatic phonetic matching** — catches "ay", "a i", "ay eye" etc. for "AI"
 - 📐 **Plural & possessive support** — "AIs", "AI's", "hellos" etc. matched automatically
 - 🎙️ Microphone selector with refresh support
@@ -37,14 +44,25 @@ A macOS application that uses **Vosk** (offline, real-time speech recognition) a
    pip install -r requirements.txt
    ```
 
-3. **Download the Vosk speech model** (~40 MB):
+3. **Download a Vosk speech model**:
+
+   Recommended (better recognition, larger RAM/disk):
+   ```zsh
+   curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
+   unzip -q vosk-model.zip && rm vosk-model.zip
+   ```
+   This creates `vosk-model-en-us-0.22/`.
+
+   Lightweight alternative:
    ```zsh
    curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
    unzip -q vosk-model.zip && rm vosk-model.zip
    ```
-   This creates the `vosk-model-small-en-us-0.15/` directory used by the app.
+   This creates `vosk-model-small-en-us-0.15/`.
 
-   > **Tip:** The `run_app.sh` launcher script automatically creates the venv, installs missing packages, and downloads the model if needed — so you can skip steps 2–3 and just run `./run_app.sh`.
+   The app prefers the large model automatically when both exist.
+
+   > **Tip:** The `run_app.sh` launcher installs missing Python packages and downloads a model if needed. It requires an existing `venv/` directory.
 
 4. **Grant microphone permissions:**
    - When you first run the app, macOS will ask for microphone permission
@@ -68,9 +86,11 @@ A macOS application that uses **Vosk** (offline, real-time speech recognition) a
 
 2. **Select your microphone** from the dropdown (refresh if needed)
 
-3. **Enter your target word** in the input field (default is "AI")
+3. **Choose a mode**:
+   - **Buzzword**: enter a target word (default "AI")
+   - **Dashboard**: no target word required
 
-4. **Click "Start Listening"** to begin speech recognition
+4. **Click "Start"** to begin speech recognition
 
    - The app first runs a short **3-second mic calibration** phase.
    - During this time, status shows `Calibrating mic...` and early audio is intentionally ignored.
@@ -78,12 +98,13 @@ A macOS application that uses **Vosk** (offline, real-time speech recognition) a
 
 5. **Speak naturally** — the app will:
    - Display what it heard in the transcript area
-   - Count occurrences of your target word in real time
+   - In Buzzword mode: count occurrences of your target word in real time
+   - In Dashboard mode: build a sorted word-frequency table
    - Show both partial (live) and final (committed) results
 
 6. **Click "Stop"** to pause listening
 
-7. **Click "Reset Count"** to clear the counter back to zero
+7. **Click "Reset"** to clear counters and transcript
 
 ## How It Works
 
@@ -118,7 +139,7 @@ PyAudio captures 250ms frames → for abbreviations, both recognizers process ea
 To improve first-run accuracy, the app ignores the first **3.0 seconds** of microphone input after Start is pressed. This allows macOS audio routing, gain control, and noise suppression to stabilize before recognition/counting begins.
 
 ### Phonetic Matching
-When you click "Start Listening", the app builds a `PhoneticMatcher` for your target word:
+When you click "Start" in Buzzword mode, the app builds a `PhoneticMatcher` for your target word:
 
 - **Abbreviations** (e.g. "AI", "GPU", "ML", "SAS"): auto-generates letter-by-letter phonetic variants using a built-in pronunciation table. For short abbreviations (like "AI"), standalone sounds (e.g. "ay") are included for recall. For longer abbreviations (3+ letters), standalone letter sounds are excluded to reduce false positives. Phonetic neighbours are intentionally skipped for abbreviations.
 - **Regular words**: uses Metaphone and Soundex phonetic algorithms to find similar-sounding words.
@@ -141,9 +162,13 @@ pip install pyaudio
 ```
 
 ### Vosk model not found
-Make sure the `vosk-model-small-en-us-0.15/` directory exists in the project root. Re-download if needed:
+Make sure at least one model directory exists in the project root:
+- `vosk-model-en-us-0.22/` (preferred)
+- `vosk-model-small-en-us-0.15/`
+
+Re-download if needed:
 ```zsh
-curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
 unzip -q vosk-model.zip && rm vosk-model.zip
 ```
 
@@ -152,7 +177,7 @@ unzip -q vosk-model.zip && rm vosk-model.zip
 - Speak clearly and at a moderate pace
 - Reduce background noise
 - Move your microphone closer
-- For better accuracy, consider downloading a larger Vosk model (e.g., `vosk-model-en-us-0.22`, ~1.8 GB)
+- For better accuracy (especially fillers/short sounds), use `vosk-model-en-us-0.22`
 
 ## Running Tests
 
@@ -170,6 +195,7 @@ All 151 tests should pass.
 - **Abbreviations are auto-expanded** into phonetic variants, with stricter matching for 3+ letter acronyms to reduce false positives
 - **Plurals and possessives** are matched automatically (e.g. "AIs", "AI's")
 - The counter increments for each occurrence of the word, even if it appears multiple times in one phrase
+- Dashboard mode tracks all recognized words in memory and sorts by highest count
 - The app uses peak-partial tracking and confidence filtering so words are not double-counted or lost during streaming
 - Audio stream retries up to 5 consecutive read errors before stopping
 - Vosk model loading retries up to 3 times with 1-second delays
