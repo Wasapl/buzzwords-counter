@@ -255,7 +255,7 @@ venv\Scripts\activate
 python -m unittest test_word_counter
 ```
 
-All 151 tests should pass.
+All 186 tests should pass (156 word_counter + 30 run_app).
 
 ## Notes
 
