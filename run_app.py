@@ -9,8 +9,10 @@ and then start word_counter.py.
 
 import os
 import platform
+import ssl
 import subprocess
 import sys
+import zipfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -64,7 +66,8 @@ def _download_with_progress(url, dest):
     import urllib.request
 
     print(f"Downloading {url}")
-    with urllib.request.urlopen(url) as resp, open(dest, "wb") as out:  # noqa: S310
+    ctx = ssl.create_default_context()  # enforce certificate verification
+    with urllib.request.urlopen(url, context=ctx) as resp, open(dest, "wb") as out:
         total = int(resp.headers.get("Content-Length", 0))
         downloaded = 0
         chunk_size = 256 * 1024
@@ -80,6 +83,24 @@ def _download_with_progress(url, dest):
                 mb_total = total // (1024 * 1024)
                 print(f"\r  {pct:3d}%  {mb_done} / {mb_total} MB", end="", flush=True)
     print()
+
+
+def _safe_extract_all(zf: zipfile.ZipFile, dest_dir: str) -> None:
+    """Extract *zf* to *dest_dir*, rejecting members whose resolved path
+    would land outside *dest_dir* (Zip Slip / path-traversal defence).
+
+    Raises ``ValueError`` if any member would escape the destination.
+    """
+    abs_dest = os.path.realpath(dest_dir)
+    for member in zf.infolist():
+        member_path = os.path.realpath(os.path.join(abs_dest, member.filename))
+        # The resolved member path must start with abs_dest + separator
+        # so that e.g. "../evil" or "/etc/passwd" entries are rejected.
+        if not (member_path == abs_dest or member_path.startswith(abs_dest + os.sep)):
+            raise ValueError(
+                f"Zip Slip blocked: {member.filename!r} would extract outside destination"
+            )
+        zf.extract(member, dest_dir)
 
 
 def _ensure_model():
@@ -103,14 +124,12 @@ def _ensure_model():
     print(f"  {MODEL_SMALL_URL}")
     print()
 
-    import zipfile
-
     zip_path = os.path.join(SCRIPT_DIR, "vosk-model.zip")
     try:
         _download_with_progress(MODEL_LARGE_URL, zip_path)
         print("Extracting model…")
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(SCRIPT_DIR)
+            _safe_extract_all(zf, SCRIPT_DIR)
         os.remove(zip_path)
         print("Model ready.")
     except KeyboardInterrupt:
