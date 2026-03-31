@@ -1,5 +1,5 @@
-#!/bin/zsh
-# BuzzWords Counter Launcher
+#!/usr/bin/env bash
+# BuzzWords Counter Launcher — macOS / Linux
 set -e
 
 # Navigate to app directory

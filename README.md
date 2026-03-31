@@ -1,6 +1,6 @@
 # BuzzWords Counter
 
-A macOS application that uses **Vosk** (offline, real-time speech recognition) for two live modes:
+A cross-platform application (macOS, Linux, Windows) that uses **Vosk** (offline, real-time speech recognition) for two live modes:
 
 - **Buzzword mode**: count how many times you say one target word
 - **Dashboard mode**: track all recognized words and show frequency ranking (most-used to least-used)
@@ -25,62 +25,102 @@ It automatically catches many abbreviation mis-transcriptions like "AI", "GPU", 
 
 ## Requirements
 
-- macOS
-- Python 3.13+ (Homebrew recommended)
+- **macOS, Linux, or Windows**
+- Python 3.8+
 - Microphone access
-- `python-tk@3.13` (for Tkinter GUI), installable via `brew install python-tk@3.13`
+- Tkinter (usually bundled with Python; see platform notes below)
+
+### Platform notes
+
+| Platform | Tkinter | PortAudio (for PyAudio) |
+|----------|---------|-------------------------|
+| **macOS** | `brew install python-tk@3.13` | `brew install portaudio` |
+| **Linux** | `sudo apt install python3-tk` (Debian/Ubuntu) | `sudo apt install portaudio19-dev` |
+| **Windows** | Included with the official python.org installer | Included in the PyAudio wheel |
 
 ## Installation
 
 1. **Clone or download** the project:
-   ```zsh
-   cd ~/word-counter-app
+   ```
+   cd word-counter-app
    ```
 
 2. **Create a virtual environment and install dependencies:**
-   ```zsh
+
+   macOS / Linux:
+   ```bash
    python3 -m venv venv
    source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+   Windows (Command Prompt or PowerShell):
+   ```bat
+   python -m venv venv
+   venv\Scripts\activate
    pip install -r requirements.txt
    ```
 
 3. **Download a Vosk speech model**:
 
    Recommended (better recognition, larger RAM/disk):
-   ```zsh
+   ```bash
+   # macOS / Linux
    curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
    unzip -q vosk-model.zip && rm vosk-model.zip
    ```
+   ```powershell
+   # Windows PowerShell
+   Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip -OutFile vosk-model.zip
+   Expand-Archive vosk-model.zip . && Remove-Item vosk-model.zip
+   ```
    This creates `vosk-model-en-us-0.22/`.
 
-   Lightweight alternative:
-   ```zsh
+   Lightweight alternative (40 MB):
+   ```bash
+   # macOS / Linux
    curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
    unzip -q vosk-model.zip && rm vosk-model.zip
    ```
+   ```powershell
+   # Windows PowerShell
+   Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -OutFile vosk-model.zip
+   Expand-Archive vosk-model.zip . && Remove-Item vosk-model.zip
+   ```
    This creates `vosk-model-small-en-us-0.15/`.
 
-   The app prefers the large model automatically when both exist.
+   The app prefers the large model automatically when both are present.
 
-   > **Tip:** The `run_app.sh` launcher installs missing Python packages and downloads a model if needed. It requires an existing `venv/` directory.
+   > **Tip:** The `run_app.py` launcher installs missing Python packages and downloads a model automatically. It only requires an existing `venv/` directory.
 
-4. **Grant microphone permissions:**
-   - When you first run the app, macOS will ask for microphone permission
-   - Go to System Settings > Privacy & Security > Microphone
-   - Ensure Terminal (or your Python IDE) has microphone access
+4. **Grant microphone permissions** (macOS / Linux):
+   - macOS: System Settings > Privacy & Security > Microphone — allow Terminal or your Python IDE
+   - Linux: ensure your user is in the `audio` group (`sudo usermod -aG audio $USER`)
 
 ## Usage
 
 1. **Run the application:**
-   ```zsh
-   cd ~/word-counter-app
+
+   **Recommended — works on all platforms:**
+   ```bash
+   python run_app.py        # macOS / Linux
+   python run_app.py        # Windows
+   ```
+
+   **macOS / Linux shell shortcut:**
+   ```bash
+   chmod +x run_app.sh
    ./run_app.sh
    ```
 
-   Or alternatively:
-   ```zsh
-   cd ~/word-counter-app
+   **Or manually (after activating the venv):**
+   ```bash
+   # macOS / Linux
    source venv/bin/activate
+   python word_counter.py
+
+   # Windows
+   venv\Scripts\activate
    python word_counter.py
    ```
 
@@ -136,7 +176,7 @@ Vosk emits partial results as speech is being recognized. Sometimes a partial co
 PyAudio captures 250ms frames → for abbreviations, both recognizers process each frame (grammar results drive the counter with confidence filtering, unconstrained results drive the transcript); for regular words, only the unconstrained recognizer runs and drives both counting and transcript.
 
 ### Startup Calibration
-To improve first-run accuracy, the app ignores the first **3.0 seconds** of microphone input after Start is pressed. This allows macOS audio routing, gain control, and noise suppression to stabilize before recognition/counting begins.
+To improve first-run accuracy, the app ignores the first **3.0 seconds** of microphone input after Start is pressed. This allows audio routing, gain control, and noise suppression to stabilize before recognition/counting begins.
 
 ### Phonetic Matching
 When you click "Start" in Buzzword mode, the app builds a `PhoneticMatcher` for your target word:
@@ -149,16 +189,34 @@ When you click "Start" in Buzzword mode, the app builds a `PhoneticMatcher` for 
 ## Troubleshooting
 
 ### Microphone not working
-- Check System Settings > Privacy & Security > Microphone permissions
+- **macOS**: System Settings > Privacy & Security > Microphone — allow Terminal / your IDE
+- **Linux**: Run `sudo usermod -aG audio $USER` and log out/in; check `arecord -l` for device list
+- **Windows**: Settings > Privacy > Microphone — allow desktop apps access
 - Ensure your microphone is working in other applications
 - Try selecting a different microphone from the dropdown
 - Try restarting the application
 
 ### PyAudio installation errors
-If `pip install pyaudio` fails, install PortAudio first:
-```zsh
+
+**macOS** — install PortAudio first:
+```bash
 brew install portaudio
 pip install pyaudio
+```
+
+**Linux (Debian/Ubuntu)**:
+```bash
+sudo apt install portaudio19-dev python3-dev
+pip install pyaudio
+```
+
+**Windows** — pre-built wheels are available for Python 3.8+:
+```bat
+pip install pyaudio
+```
+If that fails, try:
+```bat
+pip install pipwin && pipwin install pyaudio
 ```
 
 ### Vosk model not found
@@ -166,10 +224,16 @@ Make sure at least one model directory exists in the project root:
 - `vosk-model-en-us-0.22/` (preferred)
 - `vosk-model-small-en-us-0.15/`
 
-Re-download if needed:
-```zsh
+Re-download if needed (macOS / Linux):
+```bash
 curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
 unzip -q vosk-model.zip && rm vosk-model.zip
+```
+
+Windows PowerShell:
+```powershell
+Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip -OutFile vosk-model.zip
+Expand-Archive vosk-model.zip . && Remove-Item vosk-model.zip
 ```
 
 ### Poor recognition accuracy
@@ -181,8 +245,13 @@ unzip -q vosk-model.zip && rm vosk-model.zip
 
 ## Running Tests
 
-```zsh
+```bash
+# macOS / Linux
 source venv/bin/activate
+python -m unittest test_word_counter
+
+# Windows
+venv\Scripts\activate
 python -m unittest test_word_counter
 ```
 
