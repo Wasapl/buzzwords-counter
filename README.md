@@ -42,7 +42,7 @@ It automatically catches many abbreviation mis-transcriptions like "AI", "GPU", 
 
 1. **Clone or download** the project:
    ```
-   cd word-counter-app
+   git clone https://github.com/alex-coldsv/buzzwords-counter.git && cd buzzwords-counter
    ```
 
 2. **Create a virtual environment and install dependencies:**
